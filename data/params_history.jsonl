@@ -1,0 +1,2 @@
+{"date": "2026-09-06", "kind": "calibration", "param": "max_positions", "old": 8, "new": 10, "reason": "運用開始前の検証（2020-22／2023-24／2024-26 の3期間）で、最大10銘柄×12%が全期間で同等以上（+7pt／+11pt／+1pt）かつ最大DDは同程度。分散を高める。"}
+{"date": "2026-09-06", "kind": "calibration", "param": "max_position_weight", "old": 0.15, "new": 0.12, "reason": "max_positions=10 に合わせて1銘柄上限を12%に。合計上限120%だが現金制約でレバレッジは掛からない。"}

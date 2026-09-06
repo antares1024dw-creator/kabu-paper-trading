@@ -1,0 +1,72 @@
+# 平日 16:13（日本時間）に GitHub のサーバーで日次処理を実行し、記録をコミットし、ボードを GitHub Pages に公開する
+name: daily-step
+
+on:
+  schedule:
+    - cron: "13 7 * * 1-5"   # UTC 07:13 = JST 16:13（東証大引け 15:30 の後）
+  workflow_dispatch:          # 手動実行も可能
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: daily-step
+  cancel-in-progress: false
+
+jobs:
+  step:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: ライブラリを入れる
+        run: pip install -r requirements.txt
+
+      - name: 日次処理（価格更新 → 約定 → 判断 → 記録 → 反省 → 通知 → ボード生成）
+        env:
+          TZ: Asia/Tokyo
+          STOCKSIM_PUBLIC: "1"                                  # ボードに noindex を付ける
+          STOCKSIM_EMAIL_FROM: ${{ secrets.STOCKSIM_EMAIL_FROM }}   # 任意: Gmail 通知
+          STOCKSIM_EMAIL_TO: ${{ secrets.STOCKSIM_EMAIL_TO }}
+          STOCKSIM_SMTP_PASSWORD: ${{ secrets.STOCKSIM_SMTP_PASSWORD }}
+          STOCKSIM_NTFY_TOPIC: ${{ secrets.STOCKSIM_NTFY_TOPIC }}     # 任意: iPhone プッシュ通知
+        run: python run.py step
+
+      - name: 記録をコミット
+        run: |
+          git config user.name "kabu-sim-bot"
+          git config user.email "kabu-sim-bot@users.noreply.github.com"
+          git add -A data notifications.md dashboard.html config.json knowledge
+          if git diff --cached --quiet; then
+            echo "変更なし"
+          else
+            git commit -m "daily: $(TZ=Asia/Tokyo date +%Y-%m-%d)"
+            git push
+          fi
+
+      - name: ボードを公開用フォルダに置く
+        run: |
+          mkdir -p site
+          cp dashboard.html site/index.html
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: step
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

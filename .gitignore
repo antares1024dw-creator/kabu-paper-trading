@@ -1,0 +1,14 @@
+# --- 公開リポジトリに含めないもの ---
+# Yahoo Finance の生データ（再配布しない。毎回取り直す）
+data/prices/
+# 初期化前の古い記録
+data/archive/
+# 実行ログ
+logs/
+# 公開用の一時フォルダ
+site/
+# Python の一時ファイル
+__pycache__/
+*.pyc
+.venv/
+*.tmp
