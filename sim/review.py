@@ -33,8 +33,9 @@ def should_review(D: pd.Timestamp, tdays: list, cfg: dict) -> list:
     kinds = []
     if D.weekday() == cfg["review"].get("weekly_weekday", 4):
         kinds.append("weekly")
-    i = tdays.index(D) if D in tdays else -1
-    if i >= 0 and (i + 1 >= len(tdays) or tdays[i + 1].month != D.month):
+    # 月末判定: 翌営業日（土日を除く）が翌月なら月末。データの最終日を月末と誤認しないよう暦で判定する
+    nxt = D + pd.offsets.BDay(1)
+    if nxt.month != D.month:
         kinds.append("monthly")
     return kinds
 
@@ -224,10 +225,12 @@ def run_review(cfg: dict, sim, kind: str, asof: pd.Timestamp, log=print, force: 
     for t in positions:
         s = SECTORS.get(t, "その他")
         sectors[s] = sectors.get(s, 0) + 1
+    cap = p.get("max_per_sector", 0) or 99
     for s, n in sectors.items():
-        if n >= 3:
-            bad.append(f"同一業種（{s}）に {n} 銘柄が集中している。相場のテーマが崩れたとき同時に損失が出るリスク。")
-            hyp.append("仮説: 業種あたり最大 2 銘柄の制限を加えると、分散は改善するがモメンタム上位の取りこぼしが出る。")
+        if n > cap:
+            bad.append(f"同一業種（{s}）が {n} 銘柄で上限 {cap} を超えている。ルールの実装を確認する。")
+        elif n >= cap:
+            hyp.append(f"{s}が上限の {n} 銘柄。テーマ（例: 金利上昇）が崩れると同時に損失が出るが、各銘柄の想定損失は資産の {p['risk_per_trade'] * 100:.0f}% なので合計でも約 {n * p['risk_per_trade'] * 100:.0f}%。検証では業種上限を厳しくすると成績が落ちたため、上限 {cap} を維持して観察する。")
     if m.get("current_dd") is not None and m["current_dd"] < -0.05:
         bad.append(f"ピークから {m['current_dd'] * 100:.1f}% のドローダウン中。ルール通りストップで損失を限定し、感情で早売り・ナンピンをしない。")
     if stats.get("n_closed", 0) >= 10:

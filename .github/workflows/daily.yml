@@ -57,6 +57,12 @@ jobs:
           mkdir -p site
           cp dashboard.html site/index.html
 
+      - name: Pages を有効化（未設定なら試みる。権限不足で失敗しても記録の保存には影響しない）
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+        continue-on-error: true
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
