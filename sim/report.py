@@ -399,7 +399,7 @@ const kp = [
   {l:'TOPIX（同期間）', v:pctS(M.bench && M.bench[pb]), c:cls(M.bench && M.bench[pb]), s:'1306 連動ETF'},
   {l:'超過リターン', v:(M.excess==null?'—':(M.excess>=0?'+':'-')+Math.abs(M.excess*100).toFixed(2)+'pt'), c:cls(M.excess), s:'対 TOPIX'},
   {l:'最大ドローダウン', v:pct(M.max_dd), c:cls(M.max_dd), s:M.max_dd_date ? M.max_dd_date : '—'},
-  {l:'シャープレシオ', v:num(M.sharpe), c:'', s:'年率換算・無リスク金利0'},
+  {l:'シャープレシオ', v:(M.n_days||0) >= 20 ? num(M.sharpe) : '—', c:'', s:(M.n_days||0) >= 20 ? '年率換算・無リスク金利0' : '20営業日以上で表示'},
   {l:'勝率', v:T.n_closed ? pct(T.win_rate,0) : '—', c:'', s:'決済 ' + (T.n_closed||0) + ' 件'},
   {l:'プロフィットファクター', v:num(T.profit_factor), c:'', s:'総利益 ÷ 総損失'},
   {l:'投資比率', v:pct(M.exposure==null?0:M.exposure,0), c:'', s:'保有 ' + (M.n_positions||0) + ' 銘柄'},
