@@ -77,7 +77,7 @@ UNIVERSE = [
     ("7011.T", "三菱重工業", "機械"),
     ("7012.T", "川崎重工業", "輸送用機器"),
     ("7013.T", "IHI", "機械"),
-    ("7186.T", "コンコルディアFG", "銀行"),
+    ("7186.T", "横浜FG（旧コンコルディア）", "銀行"),
     ("7202.T", "いすゞ自動車", "輸送用機器"),
     ("7203.T", "トヨタ自動車", "輸送用機器"),
     ("7267.T", "ホンダ", "輸送用機器"),
@@ -135,6 +135,18 @@ BENCHMARKS = {
 NAMES = {t: n for t, n, _ in UNIVERSE}
 NAMES.update(BENCHMARKS)
 SECTORS = {t: s for t, _, s in UNIVERSE}
+
+
+# 大分類（テーマ集中の検証用）。細かい業種が違っても、値動きの源泉が同じものをまとめる。
+SECTOR_GROUP = {"銀行": "金融", "証券": "金融", "保険": "金融", "その他金融": "金融"}
+GROUP_OVERRIDE = {"6178.T": "金融"}  # 日本郵政: 利益の大半がゆうちょ銀行・かんぽ生命
+
+
+def group_of(ticker: str) -> str:
+    if ticker in GROUP_OVERRIDE:
+        return GROUP_OVERRIDE[ticker]
+    sec = SECTORS.get(ticker, "その他")
+    return SECTOR_GROUP.get(sec, sec)
 
 
 def tickers():

@@ -76,7 +76,28 @@ def summary_line(m: dict) -> str:
 def cmd_step(args):
     cfg = load_config()
     prices, asof = load_prices(cfg, args.full)
+    # 配当・株式分割（保有・発注中・直近に売った銘柄とベンチマークだけ調べる）
+    st0 = {}
+    sp = os.path.join(LIVE_DIR, "state.json")
+    if os.path.exists(sp):
+        with open(sp, "r", encoding="utf-8") as f:
+            st0 = json.load(f)
+    watch = sorted(set(st0.get("positions", {})) | {o["ticker"] for o in st0.get("pending_orders", [])}
+                   | {c["ticker"] for c in st0.get("closed_positions", [])} | set(cfg["benchmarks"]))
+    expected = []
+    ep = os.path.join(DATA_DIR, "expected_actions.json")
+    if os.path.exists(ep):
+        with open(ep, "r", encoding="utf-8") as f:
+            expected = json.load(f)
+    actions = market.merge_expected_actions(
+        market.fetch_actions(watch, st0.get("start_date", cfg["start_date"]), log), expected)
+    prices = market.adjust_unadjusted_splits(prices, actions, log)
     sim = Simulator(cfg, prices, LIVE_DIR, log)
+    sim.actions = actions
+    cp = os.path.join(DATA_DIR, "cashflows.json")     # 追加入金の指示（オーナーの決定を記録したもの）
+    if os.path.exists(cp):
+        with open(cp, "r", encoding="utf-8") as f:
+            sim.cashflows = json.load(f)
     days = sim.run_until(asof)
     if days:
         log(f"処理した営業日: {', '.join(d.strftime('%m/%d') for d in days)}")
@@ -104,7 +125,8 @@ def cmd_step(args):
     log(line)
     log(f"ダッシュボード: {out}")
     for e in sim.events:
-        if e["type"] in ("BUY_SIGNAL", "SELL_SIGNAL", "FILLED_BUY", "FILLED_SELL", "CANCELLED", "REVIEW", "PARAM_CHANGE"):
+        if e["type"] in ("BUY_SIGNAL", "SELL_SIGNAL", "FILLED_BUY", "FILLED_SELL", "CANCELLED", "REVIEW", "PARAM_CHANGE",
+                         "DIVIDEND", "SPLIT", "CASHFLOW"):
             log("  " + (e.get("text") or e.get("reason", "")))
 
 
@@ -172,9 +194,11 @@ def cmd_status(args):
         print(f"処理済み: {st.get('last_processed_date')}  現金 {st['cash']:,.0f}円  保有 {len(st['positions'])} 銘柄  未約定 {len(st['pending_orders'])} 件")
         for t, p in st["positions"].items():
             lc = p.get("last_close", p["avg_price"])
-            print(f"  {code_of(t)} {name_of(t):<14} {p['shares']:>5}株 取得{p['avg_price']:>9,.0f} 現在{lc:>9,.0f} ({(lc / p['avg_price'] - 1) * 100:+.1f}%) 損切{p['stop_price']:>9,.0f}")
+            stop = f"損切{p['stop_price']:>9,.0f}" if p.get("stop_price") is not None else "コア（買い持ち）"
+            print(f"  {code_of(t)} {name_of(t):<14} {p['shares']:>5}株 取得{p['avg_price']:>9,.0f} 現在{lc:>9,.0f} ({(lc / p['avg_price'] - 1) * 100:+.1f}%) {stop}")
         for o in st["pending_orders"]:
-            print(f"  [未約定] {o['side']} {code_of(o['ticker'])} {name_of(o['ticker'])} {o['shares']}株（{o['signal_date']} 判断）")
+            qty = f"{o['shares']}株" if o.get("shares") is not None else f"{o.get('budget', 0):,.0f}円ぶん"
+            print(f"  [未約定] {o['side']} {code_of(o['ticker'])} {name_of(o['ticker'])} {qty}（{o['signal_date']} 判断）")
     print(json.dumps({k: m[k] for k in ("total_return", "max_dd", "sharpe", "excess") if k in m}, ensure_ascii=False))
 
 

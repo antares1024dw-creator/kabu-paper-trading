@@ -51,6 +51,12 @@ VARIANTS = {
     "業種上限2(現行)": {"max_per_sector": 2},
     "業種上限3": {"max_per_sector": 3},
     "業種上限4": {"max_per_sector": 4},
+    "金融G上限4": {"max_per_group": 4},
+    "金融G上限5": {"max_per_group": 5},
+    "金融G上限6": {"max_per_group": 6},
+    "新規1日1件": {"max_new_per_day": 1},
+    "新規1日2件": {"max_new_per_day": 2},
+    "新規1日3件": {"max_new_per_day": 3},
 }
 
 

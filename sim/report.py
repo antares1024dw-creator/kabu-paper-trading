@@ -81,9 +81,12 @@ def _positions(state: dict) -> list:
         last = float(df["Close"].iloc[-1]) if df is not None and len(df) else pos.get("last_close", pos["avg_price"])
         prev = float(df["Close"].iloc[-2]) if df is not None and len(df) > 1 else last
         last = pos.get("last_close", last)
+        prev = pos.get("prev_close", prev)   # 帳簿側の前日終値（分割の換算後）。無ければ価格キャッシュから
         value = last * pos["shares"]
         out.append({
-            "ticker": t, "code": code_of(t), "name": name_of(t), "sector": SECTORS.get(t, ""),
+            "ticker": t, "code": code_of(t), "name": name_of(t),
+            "sector": "指数 ETF" if pos.get("sleeve") == "core" else SECTORS.get(t, ""),
+            "sleeve": pos.get("sleeve", "strategy"),
             "shares": pos["shares"], "avg_price": pos["avg_price"], "last": last, "day_change": last / prev - 1 if prev else 0,
             "value": value, "pnl": value - pos["avg_price"] * pos["shares"], "pnl_pct": last / pos["avg_price"] - 1,
             "stop": pos.get("stop_price"), "highest": pos.get("highest_close"),
@@ -101,8 +104,30 @@ def _pending(state: dict) -> list:
     out = []
     for o in state.get("pending_orders", []):
         out.append({"ticker": o["ticker"], "code": code_of(o["ticker"]), "name": name_of(o["ticker"]), "side": o["side"],
-                    "shares": o["shares"], "signal_close": o.get("signal_close"), "signal_date": o.get("signal_date"),
+                    "shares": o.get("shares"), "budget": o.get("budget"), "sleeve": o.get("sleeve", "strategy"),
+                    "signal_close": o.get("signal_close"), "signal_date": o.get("signal_date"),
                     "planned_stop": o.get("planned_stop"), "reason": o.get("reason", "")})
+    return out
+
+
+def _scheduled_cashflows(state: dict) -> list:
+    """まだ反映されていない入金の予定（data/cashflows.json）。ボードに予告として出す。"""
+    p = os.path.join(DATA_DIR, "cashflows.json")
+    if not os.path.exists(p):
+        return []
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            flows = json.load(f)
+    except Exception:
+        return []
+    done = state.get("applied_cashflows", {})
+    out = []
+    for cf in flows:
+        if cf.get("id") in done:
+            continue
+        t = cf.get("ticker")
+        out.append({"date": cf.get("date"), "amount": cf.get("amount"), "sleeve": cf.get("sleeve", ""),
+                    "ticker": t, "code": code_of(t) if t else "", "name": name_of(t) if t else "", "note": cf.get("note", "")})
     return out
 
 
@@ -126,6 +151,8 @@ def build_payload(cfg: dict) -> dict:
         "events": _read_jsonl(os.path.join(DATA_DIR, "events.jsonl"), 60),
         "trades": _trades(trades, 80),
         "cash": state.get("cash", cfg["initial_cash"]),
+        "dividends_cum": state.get("dividends_cum", 0.0),
+        "scheduled_cashflows": _scheduled_cashflows(state),
         "last_processed": state.get("last_processed_date"),
         "start_date": state.get("start_date", cfg["start_date"]),
         "regime": state.get("last_regime"),
@@ -315,7 +342,7 @@ footer p{margin:4px 0}
 </section>
 
 <section id="positions">
-  <h2>保有銘柄 <small>評価額順。損切り目安は最高値から 3×ATR 下（日々切り上げ）</small></h2>
+  <h2>保有銘柄 <small>評価額順。損切り目安は最高値から 3×ATR 下（日々切り上げ）。「コア」は指数の買い持ちで損切りなし</small></h2>
   <div class="tablewrap" id="positionsTable"></div>
   <div id="pendingWrap" style="margin-top:14px"></div>
 </section>
@@ -348,7 +375,7 @@ footer p{margin:4px 0}
 
 <footer>
   <p><b>免責:</b> このページは実在の株価データを使った投資シミュレーション（ペーパートレード）の記録です。実際の資金は一切使っておらず、証券口座にも接続していません。特定の銘柄の売買を推奨する投資助言ではありません。</p>
-  <p><b>データ:</b> Yahoo Finance（yfinance 経由、15〜20 分遅延・分割/配当調整済み）。売買は翌営業日の寄付値で約定したものとして計算。税金（20.315%）は考慮していません。生の株価データは掲載していません。</p>
+  <p><b>データ:</b> Yahoo Finance（yfinance 経由、15〜20 分遅延・分割/配当調整済み）。売買は翌営業日の寄付値で約定したものとして計算。配当は権利落ち日に現金として計上し（金額未発表のものは見込みで計上して確定後に精算）、株式分割は株数と単価を換算します。ベンチマークも分配金込みで比較します。税金（20.315%）は考慮していません。生の株価データは掲載していません。</p>
   <p><b>楽天証券について:</b> 手数料体系（ゼロコース・かぶミニ®）を前提として参照しているだけで、楽天証券株式会社とは無関係の個人の記録です。かぶミニ® は同社の登録商標です。</p>
   <p id="gen"></p>
 </footer>
@@ -387,9 +414,9 @@ const final = M.final, init = M.initial;
 const dchg = M.daily_change||0, dpct = M.daily_change_pct||0;
 $('#hero').innerHTML =
   '<div><div class="label">総資産（現金＋評価額）</div><div class="big">' + yen(final) + '</div>' +
-    '<div class="sub">初期資産 ' + yen(init) + ' ／ 現金 ' + yen(L.cash) + '（' + pct(final?L.cash/final:1,0) + '）</div></div>' +
+    '<div class="sub">初期資産 ' + yen(init) + (M.flows_total ? ' ／ 追加入金 ' + yen(M.flows_total) : '') + ' ／ 現金 ' + yen(L.cash) + '（' + pct(final?L.cash/final:1,0) + '）' + (L.dividends_cum ? ' ／ 受取配当 ' + yen(L.dividends_cum) : '') + '</div></div>' +
   '<div><div class="label">前日比</div><div class="mid ' + cls(dchg) + '">' + yenS(dchg) + '</div><div class="sub ' + cls(dchg) + '">' + pctS(dpct) + '</div></div>' +
-  '<div><div class="label">運用開始来の損益</div><div class="mid ' + cls(M.total_pnl) + '">' + yenS(M.total_pnl||0) + '</div><div class="sub ' + cls(M.total_return) + '">' + pctS(M.total_return) + '</div></div>';
+  '<div><div class="label">運用開始来の損益</div><div class="mid ' + cls(M.total_pnl) + '">' + yenS(M.total_pnl||0) + '</div><div class="sub ' + cls(M.total_return) + '">' + pctS(M.total_return) + (M.flows_total ? '（入金の影響を除く）' : '') + '</div></div>';
 
 // ---- KPI ----
 const T = M.trades || {};
@@ -402,7 +429,7 @@ const kp = [
   {l:'シャープレシオ', v:(M.n_days||0) >= 20 ? num(M.sharpe) : '—', c:'', s:(M.n_days||0) >= 20 ? '年率換算・無リスク金利0' : '20営業日以上で表示'},
   {l:'勝率', v:T.n_closed ? pct(T.win_rate,0) : '—', c:'', s:'決済 ' + (T.n_closed||0) + ' 件'},
   {l:'プロフィットファクター', v:num(T.profit_factor), c:'', s:'総利益 ÷ 総損失'},
-  {l:'投資比率', v:pct(M.exposure==null?0:M.exposure,0), c:'', s:'保有 ' + (M.n_positions||0) + ' 銘柄'},
+  {l:'投資比率', v:pct(M.exposure==null?0:M.exposure,0), c:'', s:'ルール運用 ' + (M.n_positions||0) + ' 銘柄' + (M.core_value ? ' ＋ 指数の買い持ち' : '')},
 ];
 $('#kpis').innerHTML = kp.map(k => '<div class="kpi"><div class="label">' + k.l + '</div><div class="value ' + k.c + '">' + k.v + '</div><div class="sub">' + esc(k.s) + '</div></div>').join('');
 
@@ -464,17 +491,19 @@ function renderPositions(){
   const P = L.positions||[];
   if(!P.length){ $('#positionsTable').innerHTML = '<div class="empty">現在、保有銘柄はありません（全額現金 ' + yen(L.cash) + '）</div>'; }
   else {
-    $('#positionsTable').innerHTML = '<table><thead><tr><th>コード</th><th>銘柄</th><th>業種</th><th class="num">株数</th><th class="num">取得単価</th><th class="num">現在値</th><th class="num">前日比</th><th class="num">評価額</th><th class="num">損益</th><th class="num">損益率</th><th class="num">比率</th><th class="num">損切り目安</th><th class="num">保有日数</th></tr></thead><tbody>' +
-      P.map(p => '<tr><td>'+p.code+'</td><td title="'+esc(p.reason)+'">'+esc(p.name)+'</td><td>'+esc(p.sector)+'</td><td class="num">'+p.shares+'</td><td class="num">'+fmtN(p.avg_price)+'</td><td class="num">'+fmtN(p.last)+'</td><td class="num '+cls(p.day_change)+'">'+pctS(p.day_change,1)+'</td><td class="num">'+fmtN(p.value)+'</td><td class="num '+cls(p.pnl)+'">'+yenS(p.pnl)+'</td><td class="num '+cls(p.pnl_pct)+'">'+pctS(p.pnl_pct,1)+'</td><td class="num">'+pct(p.weight,1)+'</td><td class="num">'+fmtN(p.stop)+'</td><td class="num">'+p.days+'</td></tr>').join('') +
+    $('#positionsTable').innerHTML = '<table><thead><tr><th>区分</th><th>コード</th><th>銘柄</th><th>業種</th><th class="num">株数</th><th class="num">取得単価</th><th class="num">現在値</th><th class="num">前日比</th><th class="num">評価額</th><th class="num">損益</th><th class="num">損益率</th><th class="num">比率</th><th class="num">損切り目安</th><th class="num">保有日数</th></tr></thead><tbody>' +
+      P.map(p => '<tr><td>'+(p.sleeve==='core'?'<span class="chip note">コア</span>':'<span class="chip cancel">ルール</span>')+'</td><td>'+p.code+'</td><td title="'+esc(p.reason)+'">'+esc(p.name)+'</td><td>'+esc(p.sector)+'</td><td class="num">'+p.shares+'</td><td class="num">'+fmtN(p.avg_price)+'</td><td class="num">'+fmtN(p.last)+'</td><td class="num '+cls(p.day_change)+'">'+pctS(p.day_change,1)+'</td><td class="num">'+fmtN(p.value)+'</td><td class="num '+cls(p.pnl)+'">'+yenS(p.pnl)+'</td><td class="num '+cls(p.pnl_pct)+'">'+pctS(p.pnl_pct,1)+'</td><td class="num">'+pct(p.weight,1)+'</td><td class="num">'+(p.stop==null?'なし':fmtN(p.stop))+'</td><td class="num">'+p.days+'</td></tr>').join('') +
       '</tbody></table>';
   }
   const Q = L.pending||[];
-  $('#pendingWrap').innerHTML = Q.length ? '<h2>翌営業日の寄付で執行予定 <small>' + Q.length + ' 件</small></h2><div class="tablewrap"><table><thead><tr><th>売買</th><th>コード</th><th>銘柄</th><th class="num">株数</th><th class="num">判断時終値</th><th class="num">概算金額</th><th class="num">想定損切り</th><th>判断日</th><th>理由</th></tr></thead><tbody>' +
-    Q.map(o => '<tr><td><span class="chip '+(o.side==='BUY'?'buy':'sell')+'">'+(o.side==='BUY'?'買い':'売り')+'</span></td><td>'+o.code+'</td><td>'+esc(o.name)+'</td><td class="num">'+o.shares+'</td><td class="num">'+fmtN(o.signal_close)+'</td><td class="num">'+yen(o.shares*o.signal_close)+'</td><td class="num">'+(o.planned_stop?fmtN(o.planned_stop):'—')+'</td><td>'+esc(o.signal_date)+'</td><td class="wrap">'+esc(o.reason)+'</td></tr>').join('') + '</tbody></table></div>' : '';
+  const SC = L.scheduled_cashflows||[];
+  const sched = SC.length ? '<div class="panel" style="margin-bottom:14px"><h3>入金の予定</h3>' + SC.map(c => '<p class="note" style="color:var(--ink);font-size:13px;margin:4px 0">' + esc(c.date) + ' の寄付前に <b>' + yen(c.amount) + '</b> を追加' + (c.sleeve==='core' ? 'し、同日の寄付で ' + esc(c.name) + '(' + esc(c.code) + ') を買い付けて持ち続けます（コア）' : 'します') + '。' + esc(c.note||'') + '</p>').join('') + '</div>' : '';
+  $('#pendingWrap').innerHTML = sched + (Q.length ? '<h2>翌営業日の寄付で執行予定 <small>' + Q.length + ' 件</small></h2><div class="tablewrap"><table><thead><tr><th>売買</th><th>コード</th><th>銘柄</th><th class="num">株数</th><th class="num">判断時終値</th><th class="num">概算金額</th><th class="num">想定損切り</th><th>判断日</th><th>理由</th></tr></thead><tbody>' +
+    Q.map(o => '<tr><td><span class="chip '+(o.side==='BUY'?'buy':'sell')+'">'+(o.side==='BUY'?'買い':'売り')+'</span></td><td>'+o.code+'</td><td>'+esc(o.name)+'</td><td class="num">'+(o.shares==null?'金額指定':o.shares)+'</td><td class="num">'+(o.signal_close==null?'—':fmtN(o.signal_close))+'</td><td class="num">'+yen(o.shares==null?o.budget:o.shares*o.signal_close)+'</td><td class="num">'+(o.planned_stop?fmtN(o.planned_stop):'—')+'</td><td>'+esc(o.signal_date)+'</td><td class="wrap">'+esc(o.reason)+'</td></tr>').join('') + '</tbody></table></div>' : '');
 }
 
 // ---- 判断・通知 ----
-const CHIP = {BUY_SIGNAL:['buy','買い判断'], SELL_SIGNAL:['sell','売り判断'], FILLED_BUY:['fill','買付約定'], FILLED_SELL:['fill','売却約定'], CANCELLED:['cancel','取消'], REVIEW:['note','反省ノート'], PARAM_CHANGE:['note','ルール変更'], INFO:['cancel','お知らせ']};
+const CHIP = {BUY_SIGNAL:['buy','買い判断'], SELL_SIGNAL:['sell','売り判断'], FILLED_BUY:['fill','買付約定'], FILLED_SELL:['fill','売却約定'], CANCELLED:['cancel','取消'], REVIEW:['note','反省ノート'], PARAM_CHANGE:['note','ルール変更'], INFO:['cancel','お知らせ'], DIVIDEND:['fill','配当'], SPLIT:['note','株式分割'], CASHFLOW:['note','入金']};
 function renderFeed(){
   const E = (L.events||[]).filter(e => CHIP[e.type]);
   if(!E.length){ $('#feedList').innerHTML = '<div class="empty">まだ売買判断はありません。毎営業日の大引け後に判断が記録されます</div>'; return; }
@@ -498,7 +527,7 @@ function renderJournal(){
     : '<div class="empty">最初の反省ノートは運用開始後の金曜日（週次）に作成されます</div>';
   const H = D.params_history||[];
   $('#paramsWrap').innerHTML = H.length ? '<h2 style="margin-top:18px">ルール変更の履歴</h2><div class="tablewrap"><table><thead><tr><th>日付</th><th>種別</th><th>パラメータ</th><th class="num">変更前</th><th class="num">変更後</th><th>根拠</th></tr></thead><tbody>' +
-    H.slice().reverse().map(h=>'<tr><td>'+esc(h.date)+'</td><td>'+esc(h.kind)+'</td><td>'+esc(h.param)+'</td><td class="num">'+esc(h.old)+'</td><td class="num">'+esc(h.new)+'</td><td class="wrap">'+esc(h.reason)+'</td></tr>').join('') + '</tbody></table></div>' : '';
+    H.slice().reverse().map(h=>'<tr><td>'+esc(h.date)+'</td><td>'+esc(({calibration:'開始前の調整', owner_decision:'オーナーの決定', bugfix:'不具合の修正', weekly:'週次の反省', monthly:'月次の反省', manual:'臨時の反省'})[h.kind]||h.kind)+'</td><td>'+esc(h.param)+'</td><td class="num">'+esc(h.old)+'</td><td class="num">'+esc(h.new)+'</td><td class="wrap">'+esc(h.reason)+'</td></tr>').join('') + '</tbody></table></div>' : '';
 }
 
 // ---- バックテスト ----
@@ -533,7 +562,9 @@ function renderBT(){
 // ---- ルール ----
 (function(){ const s = D.config.strategy, b = D.config.broker;
   const items = [
-    ['初期資産', yen(D.config.initial_cash)], ['相場環境フィルタ', 'TOPIX連動ETF(1306) が ' + s.regime_sma + '日線より上のときだけ新規買い'],
+    ['元手', yen(M.contributed || D.config.initial_cash) + (M.flows_total ? '（初期 ' + yen(D.config.initial_cash) + ' ＋ 追加入金 ' + yen(M.flows_total) + '）。成績は入金の影響を除いて計算' : '')],
+    ...((M.core_value || (L.scheduled_cashflows||[]).length) ? [['資産の構成', 'コア＝TOPIX連動ETF(1306) の買い持ち。売買ルールと損切りの対象外で、相場に居続けるための土台。サテライト＝下のルールで運用する個別株。資金管理（1%リスク・1銘柄12%）はサテライトの資産額で計算し、両者のリバランスはしない']] : []),
+    ['相場環境フィルタ', 'TOPIX連動ETF(1306) が ' + s.regime_sma + '日線より上のときだけ新規買い'],
     ['銘柄選定', '終値 > ' + s.sma_fast + '日線 > ' + s.sma_slow + '日線、12-1ヶ月モメンタム上位 ' + s.top_n_candidates + ' 銘柄、20日高値の95%以上、20日平均売買代金 ' + (s.min_avg_turnover_jpy/1e8).toFixed(0) + '億円以上'],
     ['資金管理', '1トレードの想定損失 = 資産の ' + (s.risk_per_trade*100).toFixed(0) + '%（損切り幅 ' + s.atr_stop_mult + '×ATR' + s.atr_period + '）、1銘柄上限 ' + (s.max_position_weight*100).toFixed(0) + '%、最大 ' + s.max_positions + ' 銘柄、レバレッジなし'],
     ['手仕舞い', 'トレーリングストップ（最高値 − ' + s.atr_stop_mult + '×ATR）／' + s.sma_slow + '日線割れ／モメンタムがマイナス。売却後 ' + s.reentry_cooldown_days + ' 営業日は再エントリーしない'],

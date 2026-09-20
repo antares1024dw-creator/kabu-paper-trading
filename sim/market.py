@@ -18,7 +18,7 @@ PRICE_DIR = os.path.join(DATA_DIR, "prices")
 COLS = ["Open", "High", "Low", "Close", "Volume"]
 
 # 東証の大引け（15:30）。これより前に「今日」の足があれば場中の暫定値なので捨てる。
-MARKET_CLOSE = dtime(15, 35)
+MARKET_CLOSE = dtime(16, 0)   # 大引け 15:30 + Yahoo の遅延（15〜20分）を見込む
 
 
 def now_jst() -> datetime:
@@ -140,6 +140,22 @@ def update_prices(tickers: list, history_start: str, force_full: bool = False,
         for i in range(0, len(need_incr), 60):
             fetched.update(_download(need_incr[i:i + 60], start))
 
+    # 配当・分割のあと Yahoo は過去の価格を調整し直す。キャッシュと食い違う銘柄は全期間を取り直す
+    stale = []
+    for t in need_incr:
+        new, old = fetched.get(t), cached.get(t)
+        if new is None or old is None:
+            continue
+        common = old.index.intersection(new.index)
+        if len(common) and ((new.loc[common, "Close"] / old.loc[common, "Close"] - 1).abs() > 0.001).any():
+            stale.append(t)
+    if stale:
+        log(f"  過去価格が調整されたため全期間を再取得: {len(stale)} 銘柄")
+        for i in range(0, len(stale), 40):
+            fetched.update(_download(stale[i:i + 40], history_start))
+        for t in stale:
+            cached.pop(t, None)
+
     result = {}
     for t in tickers:
         new = fetched.get(t)
@@ -156,6 +172,146 @@ def update_prices(tickers: list, history_start: str, force_full: bool = False,
         result[t] = df
         _save(t, df)
     return result
+
+
+def fetch_actions(tickers: list, start: str, log=print) -> dict:
+    """配当・株式分割の一覧を取得する。{ticker: {"YYYY-MM-DD": {"dividend": 円/株, "split": 倍率}}}
+
+    Yahoo の配当額は「現在の株数ベース」（分割調整後）で返る。失敗した銘柄は空で返す（処理は止めない）。
+    """
+    import yfinance as yf
+
+    out = {}
+    start_ts = pd.Timestamp(start)
+    for t in tickers:
+        out[t] = {}
+        try:
+            a = yf.Ticker(t).actions
+        except Exception as e:
+            log(f"  配当・分割情報の取得に失敗: {t} {e!r}")
+            continue
+        if a is None or len(a) == 0:
+            continue
+        idx = pd.to_datetime(a.index)
+        if getattr(idx, "tz", None) is not None:
+            idx = idx.tz_localize(None)
+        idx = idx.normalize()
+        for ts, (_, row) in zip(idx, a.iterrows()):
+            if ts < start_ts:
+                continue
+            d = float(row.get("Dividends", 0) or 0)
+            r = float(row.get("Stock Splits", 0) or 0)
+            if d > 0 or (r > 0 and r != 1):
+                out[t][ts.strftime("%Y-%m-%d")] = {"dividend": d, "split": r}
+        _add_scheduled(out[t], a, idx, yf.Ticker(t), start_ts, t, log)
+    return out
+
+
+def _add_scheduled(acts: dict, hist, hist_idx, tk, start_ts, t, log) -> None:
+    """Yahoo が「予定」として持っている権利落ち日・分割日を、見込みとして足す（実績が載るまでのつなぎ）。
+
+    配当の見込み額は前年同時期の実績（分割があればその倍率で換算）。実績が載った時点で差額を精算する。
+    """
+    try:
+        info = tk.info or {}
+    except Exception as e:
+        log(f"  予定情報の取得に失敗: {t} {e!r}")
+        return
+    # 分割の予定
+    try:
+        sd, sf = info.get("lastSplitDate"), info.get("lastSplitFactor")
+        if sd and sf and ":" in str(sf):
+            X = pd.Timestamp(int(sd), unit="s").normalize()
+            a_, b_ = str(sf).split(":")
+            r = float(a_) / float(b_)
+            key = X.strftime("%Y-%m-%d")
+            if X >= start_ts and r > 0 and r != 1 and not (acts.get(key, {}).get("split") not in (None, 0, 0.0, 1, 1.0)):
+                acts.setdefault(key, {"dividend": 0.0, "split": 0.0})
+                acts[key]["split"] = r
+                acts[key]["split_estimated"] = True
+    except Exception:
+        pass
+    # 配当の予定（権利落ち日だけ分かっていて金額が未掲載のとき）
+    try:
+        xd = info.get("exDividendDate")
+        if xd:
+            X = pd.Timestamp(int(xd), unit="s").normalize()
+            key = X.strftime("%Y-%m-%d")
+            if X >= start_ts and not acts.get(key, {}).get("dividend"):
+                lo, hi = X - pd.Timedelta(days=385), X - pd.Timedelta(days=345)
+                prev = [(ts, float(v)) for ts, v in zip(hist_idx, hist["Dividends"]) if lo <= ts <= hi and v > 0] if "Dividends" in hist else []
+                if prev:
+                    d = prev[-1][1]
+                    acts.setdefault(key, {"dividend": 0.0, "split": 0.0})
+                    # 予定の分割がまだ Yahoo の配当履歴に反映されていない場合は、分割後の 1 株あたりに換算する
+                    if acts[key].get("split_estimated") and acts[key].get("split"):
+                        d = d / acts[key]["split"]
+                    acts[key]["dividend"] = d
+                    acts[key]["dividend_estimated"] = True
+    except Exception:
+        pass
+
+
+def adjust_unadjusted_splits(prices: dict, actions: dict, log=print) -> dict:
+    """分割の権利落ち日に Yahoo の過去価格がまだ分割調整されていない場合、こちらで調整する。
+
+    権利落ち日の終値が前日比でほぼ 1/倍率 になっていれば「未調整」と判断し、それ以前の株価を倍率で割る。
+    これをしないと、その日だけ移動平均や ATR が壊れて誤った売りシグナルが出る。
+    """
+    out = dict(prices)
+    for t, acts in (actions or {}).items():
+        df = out.get(t)
+        if df is None:
+            continue
+        for X, a in sorted(acts.items()):
+            r = float(a.get("split") or 0)
+            if not (r > 0 and r != 1):
+                continue
+            ts = pd.Timestamp(X)
+            if ts not in df.index:
+                continue
+            i = df.index.get_loc(ts)
+            if i == 0:
+                continue
+            ratio = float(df["Close"].iloc[i]) / float(df["Close"].iloc[i - 1])
+            if abs(ratio * r - 1.0) < abs(ratio - 1.0):   # 1 より 1/倍率 に近い → 過去が未調整
+                df = df.copy()
+                m = df.index < ts
+                for c in ("Open", "High", "Low", "Close"):
+                    df.loc[m, c] = df.loc[m, c] / r
+                df.loc[m, "Volume"] = df.loc[m, "Volume"] * r
+                out[t] = df
+                log(f"  分割の過去価格が未調整のため補正: {t} {X} 1→{r:g}")
+    return out
+
+
+def merge_expected_actions(actual: dict, expected: list) -> dict:
+    """Yahoo の実績に、手入力の見込み（data/expected_actions.json）を重ねる。
+
+    Yahoo への反映が遅れる配当（金額未発表の中間配当など）や分割で、帳簿が一時的に狂うのを防ぐ。
+    実績があれば実績を優先し、見込みで計上した分は実績が出た時点で差額を精算する。
+    """
+    out = {t: {x: dict(a) for x, a in acts.items()} for t, acts in (actual or {}).items()}
+    for e in expected or []:
+        t, x = e.get("ticker"), e.get("ex_date")
+        if not t or not x:
+            continue
+        a = out.setdefault(t, {}).setdefault(x, {"dividend": 0.0, "split": 0.0})
+        if e.get("dividend") and (not a.get("dividend") or a.get("dividend_estimated")):  # 手入力は自動見込みより優先
+            a["dividend"] = float(e["dividend"])
+            a["dividend_estimated"] = True
+        if e.get("split") and (not (a.get("split") and a["split"] != 1) or a.get("split_estimated")):
+            a["split"] = float(e["split"])
+            a["split_estimated"] = True
+        # 分割と同じ日の配当: Yahoo は通常「分割後の 1 株あたり」で載せるが、分割前の金額で載った場合に備える。
+        # 手入力の見込み（分割後ベース）に、倍率で割った値のほうが近ければ、分割前ベースと判断して換算する。
+        r = float(a.get("split") or 0)
+        if r > 0 and r != 1 and e.get("dividend") and a.get("dividend") and not a.get("dividend_estimated"):
+            exp_d, act_d = float(e["dividend"]), float(a["dividend"])
+            if abs(act_d / r - exp_d) < abs(act_d - exp_d):
+                a["dividend"] = act_d / r
+                a["dividend_rescaled"] = True
+    return out
 
 
 def repair_glitches(prices: dict, log=print, max_len: int = 5) -> dict:

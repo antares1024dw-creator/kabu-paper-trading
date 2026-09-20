@@ -16,7 +16,7 @@ from datetime import datetime
 import pandas as pd
 
 from .config import DATA_DIR, save_config
-from .metrics import load_nav, load_trades, compute_metrics, _ret_since, drawdown
+from .metrics import load_nav, load_trades, compute_metrics, _ret_since, drawdown, twr_index
 from .strategy import fmt_pct, fmt_yen
 from .universe import name_of, code_of, SECTORS
 
@@ -35,7 +35,7 @@ def should_review(D: pd.Timestamp, tdays: list, cfg: dict) -> list:
         kinds.append("weekly")
     # 月末判定: 翌営業日（土日を除く）が翌月なら月末。データの最終日を月末と誤認しないよう暦で判定する
     nxt = D + pd.offsets.BDay(1)
-    if nxt.month != D.month:
+    if nxt.month != D.month or (D.month == 12 and D.day >= 30):  # 12/31 は東証が休場（大納会は 12/30）
         kinds.append("monthly")
     return kinds
 
@@ -163,9 +163,9 @@ def run_review(cfg: dict, sim, kind: str, asof: pd.Timestamp, log=print, force: 
     m = compute_metrics(nav, trades, cfg["benchmarks"], cfg["initial_cash"])
     p = cfg["strategy"]
     days = KIND_DAYS[kind]
-    navs = nav["nav"].astype(float) if not nav.empty else pd.Series(dtype=float)
+    perf = twr_index(nav, cfg["initial_cash"]) if not nav.empty else pd.Series(dtype=float)  # 入金の影響を除いた成績
     primary = cfg["benchmarks"][0]
-    pr = _ret_since(navs, days) if not nav.empty else None
+    pr = _ret_since(perf, days) if not nav.empty else None
     br = _ret_since(nav[primary].astype(float), days) if (not nav.empty and primary in nav) else None
     period_trades = pd.DataFrame()
     if not trades.empty:
@@ -176,7 +176,9 @@ def run_review(cfg: dict, sim, kind: str, asof: pd.Timestamp, log=print, force: 
     whip = whipsaw_analysis(trades, sim, asof)
     stats = m.get("trades", {})
     regime = bool(m.get("regime"))
-    positions = sim.state["positions"]
+    all_positions = sim.state["positions"]
+    positions = {t: q for t, q in all_positions.items() if q.get("sleeve") != "core"}   # ルール運用ぶん
+    core = {t: q for t, q in all_positions.items() if q.get("sleeve") == "core"}        # 指数の買い持ち
 
     # 期間中の平均投資比率
     exp_period = None
@@ -256,6 +258,11 @@ def run_review(cfg: dict, sim, kind: str, asof: pd.Timestamp, log=print, force: 
     if pr is not None:
         L.append(f"- 直近{days}日: ポートフォリオ {fmt_pct(pr)} / TOPIX {fmt_pct(br) if br is not None else 'n/a'}")
     L.append(f"- 最大ドローダウン（開始来）: {fmt_pct(m['max_dd'], signed=False) if m.get('max_dd') is not None else 'n/a'}、現在 {fmt_pct(m['current_dd'], signed=False) if m.get('current_dd') is not None else 'n/a'}")
+    if m.get("flows_total"):
+        L.append(f"- 元手は {m['contributed']:,.0f}円（追加入金 {m['flows_total']:,.0f}円を含む）。損益は {m['total_pnl']:+,.0f}円。リターンは入金の影響を除いて計算")
+    if core:
+        cv = sum(q["shares"] * q.get("last_close", q["avg_price"]) for q in core.values())
+        L.append(f"- 資産の構成: 指数の買い持ち（コア）{cv:,.0f}円（{cv / m['final'] * 100:.0f}%）、ルール運用と現金 {m['final'] - cv:,.0f}円")
     L.append(f"- 保有 {len(positions)} 銘柄 / 現金比率 {(1 - m['exposure']) * 100 if m.get('exposure') is not None else 100:.0f}% / 相場環境: {'強気（TOPIX > 200日線）' if regime else '弱気（TOPIX < 200日線）'}")
     if stats.get("n_closed"):
         L.append(f"- 決済累計 {stats['n_closed']} 件、勝率 {stats['win_rate'] * 100:.0f}%、プロフィットファクター {stats['profit_factor']:.2f}" if stats.get("profit_factor") else f"- 決済累計 {stats['n_closed']} 件、勝率 {stats['win_rate'] * 100:.0f}%")
@@ -296,6 +303,9 @@ def run_review(cfg: dict, sim, kind: str, asof: pd.Timestamp, log=print, force: 
             L.append(f"- {name_of(t)}({code_of(t)}) {pos['shares']}株 取得 {pos['avg_price']:,.0f}円 → 現在 {lc:,.0f}円（{(lc / pos['avg_price'] - 1) * 100:+.1f}%）損切り目安 {pos['stop_price']:,.0f}円")
     else:
         L.append("- なし（全額現金）")
+    for t, pos in core.items():
+        lc = pos.get("last_close", pos["avg_price"])
+        L.append(f"- 【コア】{name_of(t)}({code_of(t)}) {pos['shares']}口 取得 {pos['avg_price']:,.1f}円 → 現在 {lc:,.1f}円（{(lc / pos['avg_price'] - 1) * 100:+.1f}%）買い持ち・損切りなし")
 
     context = "\n".join(L)
     ai_text = ai_review(cfg, context, log)

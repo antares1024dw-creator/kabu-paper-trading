@@ -1,18 +1,18 @@
-"""売買ルール（trend_momentum_v1）。
+"""売買ルール（trend_momentum_v1.1）。数値は config.json が正。
 
 考え方（トレンドフォロー × モメンタム × リスク管理）
   1. 相場環境フィルタ: TOPIX ETF が 200 日線より上のときだけ新規買い
   2. 銘柄選定: 上昇トレンド（終値 > 50日線 > 200日線）かつ 12-1 ヶ月モメンタム上位、
      20 日高値圏、十分な売買代金
   3. 資金管理: 1 トレードの想定損失 = 資産の 1%（損切り幅 = 3×ATR）、
-     1 銘柄の上限 = 資産の 15%、最大 8 銘柄、レバレッジなし
+     1 銘柄の上限 = 資産の 12%、最大 10 銘柄、同一業種 4 銘柄まで、レバレッジなし
   4. 手仕舞い: トレーリングストップ（最高値 − 3×ATR）／200日線割れ／モメンタム失速
 
 全ての判断は「その日の終値」で行い、約定は「翌営業日の寄付」で行う（先読みなし）。
 """
 import math
 
-from .universe import SECTORS
+from .universe import SECTORS, group_of
 
 
 def fmt_yen(x: float) -> str:
@@ -130,19 +130,28 @@ def evaluate_entries(bars: dict, positions: dict, pending: list, cash_available:
     # 業種の集中を避ける（同一業種の保有＋発注予定を数える）
     max_sector = p.get("max_per_sector", 0)
     sector_count = {}
+    max_group = p.get("max_per_group", 0)      # 大分類（金融など）の上限。0=無効
+    max_new = p.get("max_new_per_day", 0)      # 1日に出す新規買いの上限（分散エントリー）。0=無効
+    group_count = {}
     for t in list(positions) + [o["ticker"] for o in pending if o["side"] == "BUY"]:
         s = SECTORS.get(t, "その他")
         sector_count[s] = sector_count.get(s, 0) + 1
+        group_count[group_of(t)] = group_count.get(group_of(t), 0) + 1
     for t, b, rank in ranked[: p["top_n_candidates"]]:
         if slots <= 0 or cash_left <= 0:
             break
         sec = SECTORS.get(t, "その他")
         if max_sector and sector_count.get(sec, 0) >= max_sector:
             continue
+        if max_group and group_count.get(group_of(t), 0) >= max_group:
+            continue
+        if max_new and len(signals) >= max_new:
+            break
         shares, note = size_position(b["Close"], b["atr"], equity, cash_left, p, broker)
         if shares <= 0:
             continue
         sector_count[sec] = sector_count.get(sec, 0) + 1
+        group_count[group_of(t)] = group_count.get(group_of(t), 0) + 1
         cost = shares * b["Close"]
         stop = b["Close"] - p["atr_stop_mult"] * b["atr"]
         weight = cost / equity

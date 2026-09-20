@@ -12,3 +12,5 @@ __pycache__/
 *.pyc
 .venv/
 *.tmp
+# Claude のローカル設定（プレビュー用）
+.claude/

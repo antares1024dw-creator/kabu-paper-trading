@@ -12,10 +12,12 @@ from datetime import datetime
 
 from .config import ROOT
 
-DECISION_TYPES = {"BUY_SIGNAL", "SELL_SIGNAL", "FILLED_BUY", "FILLED_SELL", "CANCELLED", "REVIEW", "PARAM_CHANGE"}
+DECISION_TYPES = {"BUY_SIGNAL", "SELL_SIGNAL", "FILLED_BUY", "FILLED_SELL", "CANCELLED", "REVIEW", "PARAM_CHANGE",
+                  "DIVIDEND", "SPLIT", "CASHFLOW"}
 LABELS = {
     "BUY_SIGNAL": "買い判断", "SELL_SIGNAL": "売り判断", "FILLED_BUY": "買付約定", "FILLED_SELL": "売却約定",
     "CANCELLED": "取消", "REVIEW": "反省ノート", "PARAM_CHANGE": "ルール変更", "INFO": "お知らせ",
+    "DIVIDEND": "配当", "SPLIT": "株式分割", "CASHFLOW": "入金",
 }
 
 _TOAST_PS = r'''
